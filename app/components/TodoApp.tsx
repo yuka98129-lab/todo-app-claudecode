@@ -35,11 +35,51 @@ function TrashIcon() {
   )
 }
 
+function MicIcon() {
+  return (
+    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <rect x="9" y="2" width="6" height="12" rx="3" fill="currentColor" />
+      <path d="M5 11a7 7 0 0 0 14 0" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+      <line x1="12" y1="18" x2="12" y2="22" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+      <line x1="8" y1="22" x2="16" y2="22" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+    </svg>
+  )
+}
+
+// Web Speech API の型定義（TypeScript 標準 DOM 型に含まれていないため独自定義）
+interface ISpeechRecognition extends EventTarget {
+  lang: string
+  continuous: boolean
+  interimResults: boolean
+  start(): void
+  stop(): void
+  onstart: (() => void) | null
+  onend: (() => void) | null
+  onresult: ((e: ISpeechRecognitionEvent) => void) | null
+  onerror: (() => void) | null
+}
+interface ISpeechRecognitionEvent {
+  results: { [i: number]: { [j: number]: { transcript: string } } }
+}
+interface ISpeechRecognitionConstructor { new(): ISpeechRecognition }
+
+function getSpeechRecognition(): ISpeechRecognitionConstructor | null {
+  if (typeof window === 'undefined') return null
+  const w = window as Window & {
+    SpeechRecognition?: ISpeechRecognitionConstructor
+    webkitSpeechRecognition?: ISpeechRecognitionConstructor
+  }
+  return w.SpeechRecognition ?? w.webkitSpeechRecognition ?? null
+}
+
 export default function TodoApp() {
   const [todos, setTodos] = useState<Todo[]>([])
   const [input, setInput] = useState('')
   const [loaded, setLoaded] = useState(false)
+  const [listening, setListening] = useState(false)
+  const [supportsVoice, setSupportsVoice] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
+  const recognitionRef = useRef<ISpeechRecognition | null>(null)
 
   useEffect(() => {
     try {
@@ -49,6 +89,7 @@ export default function TodoApp() {
       // ignore corrupt data
     }
     setLoaded(true)
+    setSupportsVoice(getSpeechRecognition() !== null)
   }, [])
 
   useEffect(() => {
@@ -72,6 +113,42 @@ export default function TodoApp() {
     setTodos(prev => prev.filter(t => t.id !== id))
   }
 
+  const toggleListening = () => {
+    if (listening) {
+      recognitionRef.current?.stop()
+      return
+    }
+
+    const API = getSpeechRecognition()
+    if (!API) return
+
+    const recognition = new API()
+    recognition.lang = 'ja-JP'
+    recognition.interimResults = false
+    recognition.continuous = false
+
+    recognition.onstart = () => setListening(true)
+
+    recognition.onresult = (e: ISpeechRecognitionEvent) => {
+      const transcript = e.results[0][0].transcript
+      setInput(prev => prev ? prev + transcript : transcript)
+    }
+
+    recognition.onend = () => {
+      setListening(false)
+      recognitionRef.current = null
+      inputRef.current?.focus()
+    }
+
+    recognition.onerror = () => {
+      setListening(false)
+      recognitionRef.current = null
+    }
+
+    recognitionRef.current = recognition
+    recognition.start()
+  }
+
   if (!loaded) return null
 
   const completedCount = todos.filter(t => t.completed).length
@@ -91,10 +168,28 @@ export default function TodoApp() {
             value={input}
             onChange={e => setInput(e.target.value)}
             onKeyDown={e => e.key === 'Enter' && addTodo()}
-            placeholder="やることを入力..."
+            placeholder={listening ? '聞き取り中...' : 'やることを入力...'}
             className="flex-1 min-h-[50px] text-base border border-gray-300 rounded-xl px-4
                        focus:outline-none focus:ring-2 focus:ring-blue-400 focus:border-transparent bg-white"
           />
+
+          {/* 音声入力ボタン */}
+          {supportsVoice && (
+            <button
+              onClick={toggleListening}
+              aria-label={listening ? '音声入力を停止' : '音声入力を開始'}
+              aria-pressed={listening}
+              className={`flex-shrink-0 w-[50px] min-h-[50px] flex items-center justify-center rounded-xl
+                          transition-all duration-150 active:scale-95
+                          ${listening
+                            ? 'bg-red-500 text-white animate-pulse shadow-md shadow-red-200'
+                            : 'bg-white border border-gray-300 text-gray-500 hover:border-red-300 hover:text-red-400'
+                          }`}
+            >
+              <MicIcon />
+            </button>
+          )}
+
           <button
             onClick={addTodo}
             disabled={!input.trim()}
