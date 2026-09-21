@@ -2,10 +2,43 @@
 
 import { useState, useEffect, useRef } from 'react'
 
+type Priority = 'high' | 'medium' | 'low'
+
 type Todo = {
   id: string
   text: string
   completed: boolean
+  dueDate: string | null // "YYYY-MM-DD" 形式、未設定ならnull
+  priority: Priority
+}
+
+type SortMode = 'added' | 'priority' | 'due'
+
+const PRIORITY_ORDER: Record<Priority, number> = { high: 0, medium: 1, low: 2 }
+const PRIORITY_LABEL: Record<Priority, string> = { high: '高', medium: '中', low: '低' }
+const PRIORITY_CLASS: Record<Priority, string> = {
+  high: 'bg-red-50 text-red-600 border-red-200',
+  medium: 'bg-amber-50 text-amber-600 border-amber-200',
+  low: 'bg-slate-50 text-slate-500 border-slate-200',
+}
+
+function todayKey(): string {
+  const d = new Date()
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+
+function tomorrowKey(): string {
+  const d = new Date()
+  d.setDate(d.getDate() + 1)
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+
+// 期限日から「期限切れ / もうすぐ(今日・明日) / 通常」を判定する
+function dueDateStatus(dueDate: string | null): 'overdue' | 'soon' | 'normal' | null {
+  if (!dueDate) return null
+  if (dueDate < todayKey()) return 'overdue'
+  if (dueDate <= tomorrowKey()) return 'soon'
+  return 'normal'
 }
 
 function CircleIcon() {
@@ -46,6 +79,15 @@ function MicIcon() {
   )
 }
 
+function SpeakerIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path d="M4 9v6h4l5 4V5L8 9H4z" fill="currentColor" />
+      <path d="M16.5 8.5a5 5 0 0 1 0 7" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+    </svg>
+  )
+}
+
 // Web Speech API の型定義（TypeScript 標準 DOM 型に含まれていないため独自定義）
 interface ISpeechRecognition extends EventTarget {
   lang: string
@@ -72,19 +114,49 @@ function getSpeechRecognition(): ISpeechRecognitionConstructor | null {
   return w.SpeechRecognition ?? w.webkitSpeechRecognition ?? null
 }
 
+// 未完了タスクをまとめて読み上げ用の自然な文章にする
+function buildTodoSpeechText(todos: Todo[]): string {
+  const incomplete = todos.filter(t => !t.completed)
+  if (incomplete.length === 0) {
+    return '未完了のタスクはありません。'
+  }
+
+  const overdueCount = incomplete.filter(t => dueDateStatus(t.dueDate) === 'overdue').length
+  const overdueText = overdueCount > 0 ? `うち期限切れが${overdueCount}件あります。` : ''
+  const items = incomplete.map(t => t.text).join('、')
+
+  return `未完了のタスクが${incomplete.length}件あります。${overdueText}内容は、${items}、です。`
+}
+
 export default function TodoApp() {
   const [todos, setTodos] = useState<Todo[]>([])
   const [input, setInput] = useState('')
+  const [dueDateInput, setDueDateInput] = useState('')
+  const [priorityInput, setPriorityInput] = useState<Priority>('medium')
+  const [sortMode, setSortMode] = useState<SortMode>('added')
   const [loaded, setLoaded] = useState(false)
   const [listening, setListening] = useState(false)
   const [supportsVoice, setSupportsVoice] = useState(false)
+  const [speaking, setSpeaking] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
   const recognitionRef = useRef<ISpeechRecognition | null>(null)
 
   useEffect(() => {
     try {
       const stored = localStorage.getItem('todos')
-      if (stored) setTodos(JSON.parse(stored))
+      if (stored) {
+        // 期限日・優先度を追加する前に保存されたデータにもデフォルト値を補う
+        const parsed = JSON.parse(stored) as Partial<Todo>[]
+        setTodos(
+          parsed.map(t => ({
+            id: t.id ?? crypto.randomUUID(),
+            text: t.text ?? '',
+            completed: t.completed ?? false,
+            dueDate: t.dueDate ?? null,
+            priority: t.priority ?? 'medium',
+          }))
+        )
+      }
     } catch {
       // ignore corrupt data
     }
@@ -100,8 +172,18 @@ export default function TodoApp() {
   const addTodo = () => {
     const text = input.trim()
     if (!text) return
-    setTodos(prev => [...prev, { id: crypto.randomUUID(), text, completed: false }])
+    setTodos(prev => [
+      ...prev,
+      {
+        id: crypto.randomUUID(),
+        text,
+        completed: false,
+        dueDate: dueDateInput || null,
+        priority: priorityInput,
+      },
+    ])
     setInput('')
+    setDueDateInput('')
     inputRef.current?.focus()
   }
 
@@ -149,9 +231,39 @@ export default function TodoApp() {
     recognition.start()
   }
 
+  const handleSpeak = () => {
+    if (!('speechSynthesis' in window)) return
+    window.speechSynthesis.cancel()
+    const utterance = new SpeechSynthesisUtterance(buildTodoSpeechText(todos))
+    utterance.lang = 'ja-JP'
+    utterance.onstart = () => setSpeaking(true)
+    utterance.onend = () => setSpeaking(false)
+    utterance.onerror = () => setSpeaking(false)
+    window.speechSynthesis.speak(utterance)
+  }
+
+  const handleStopSpeak = () => {
+    window.speechSynthesis.cancel()
+    setSpeaking(false)
+  }
+
   if (!loaded) return null
 
   const completedCount = todos.filter(t => t.completed).length
+
+  // 表示用にソートした配列を作る（元のtodos配列の順序は変えない）
+  const sortedTodos = [...todos].sort((a, b) => {
+    if (sortMode === 'priority') {
+      return PRIORITY_ORDER[a.priority] - PRIORITY_ORDER[b.priority]
+    }
+    if (sortMode === 'due') {
+      if (!a.dueDate && !b.dueDate) return 0
+      if (!a.dueDate) return 1
+      if (!b.dueDate) return -1
+      return a.dueDate < b.dueDate ? -1 : a.dueDate > b.dueDate ? 1 : 0
+    }
+    return 0 // 'added': 追加順のまま(Array#sortは安定ソート)
+  })
 
   return (
     <div className="min-h-screen bg-gray-50 flex flex-col items-center py-10 px-4">
@@ -161,7 +273,7 @@ export default function TodoApp() {
         </h1>
 
         {/* 入力エリア */}
-        <div className="flex gap-2 mb-6">
+        <div className="flex gap-2 mb-3">
           <input
             ref={inputRef}
             type="text"
@@ -201,6 +313,29 @@ export default function TodoApp() {
           </button>
         </div>
 
+        {/* 期限日・優先度の設定エリア(新規タスク用) */}
+        <div className="flex gap-2 mb-6">
+          <input
+            type="date"
+            value={dueDateInput}
+            onChange={e => setDueDateInput(e.target.value)}
+            aria-label="期限日(任意)"
+            className="flex-1 text-sm border border-gray-300 rounded-xl px-3 py-2 bg-white
+                       focus:outline-none focus:ring-2 focus:ring-blue-400"
+          />
+          <select
+            value={priorityInput}
+            onChange={e => setPriorityInput(e.target.value as Priority)}
+            aria-label="優先度"
+            className="text-sm border border-gray-300 rounded-xl px-3 py-2 bg-white
+                       focus:outline-none focus:ring-2 focus:ring-blue-400"
+          >
+            <option value="high">優先度: 高</option>
+            <option value="medium">優先度: 中</option>
+            <option value="low">優先度: 低</option>
+          </select>
+        </div>
+
         {/* タスクリスト */}
         {todos.length === 0 ? (
           <div className="text-center py-16 text-gray-400">
@@ -209,44 +344,92 @@ export default function TodoApp() {
           </div>
         ) : (
           <>
+            {/* 並び替え・読み上げコントロール */}
+            <div className="flex items-center justify-between gap-2 mb-3">
+              <select
+                value={sortMode}
+                onChange={e => setSortMode(e.target.value as SortMode)}
+                aria-label="並び替え"
+                className="text-xs text-gray-500 border border-gray-300 rounded-lg px-2 py-1.5 bg-white
+                           focus:outline-none focus:ring-2 focus:ring-blue-400"
+              >
+                <option value="added">追加順</option>
+                <option value="priority">優先度順</option>
+                <option value="due">期限順</option>
+              </select>
+
+              <button
+                onClick={speaking ? handleStopSpeak : handleSpeak}
+                className="flex items-center gap-1.5 text-xs text-gray-500 border border-gray-300 rounded-lg
+                           px-3 py-1.5 hover:bg-gray-100 active:scale-95 transition-all duration-100"
+              >
+                <SpeakerIcon />
+                {speaking ? '読み上げ停止' : 'タスクを読み上げる'}
+              </button>
+            </div>
+
             <ul className="space-y-2">
-              {todos.map(todo => (
-                <li
-                  key={todo.id}
-                  className={`flex items-center gap-2 rounded-xl px-3 py-2 shadow-sm border transition-colors duration-200
-                    ${todo.completed ? 'bg-blue-50/40 border-blue-100' : 'bg-white border-gray-100'}`}
-                >
-                  {/* 完了トグル */}
-                  <button
-                    onClick={() => toggleTodo(todo.id)}
-                    aria-label={todo.completed ? '未完了に戻す' : '完了にする'}
-                    aria-pressed={todo.completed}
-                    className="flex-shrink-0 w-11 h-11 flex items-center justify-center
-                               rounded-full active:scale-90 transition-transform duration-100"
+              {sortedTodos.map(todo => {
+                const status = dueDateStatus(todo.dueDate)
+                return (
+                  <li
+                    key={todo.id}
+                    className={`flex items-center gap-2 rounded-xl px-3 py-2 shadow-sm border transition-colors duration-200
+                      ${todo.completed ? 'bg-blue-50/40 border-blue-100' : 'bg-white border-gray-100'}`}
                   >
-                    {todo.completed ? <CheckCircleIcon /> : <CircleIcon />}
-                  </button>
+                    {/* 完了トグル */}
+                    <button
+                      onClick={() => toggleTodo(todo.id)}
+                      aria-label={todo.completed ? '未完了に戻す' : '完了にする'}
+                      aria-pressed={todo.completed}
+                      className="flex-shrink-0 w-11 h-11 flex items-center justify-center
+                                 rounded-full active:scale-90 transition-transform duration-100"
+                    >
+                      {todo.completed ? <CheckCircleIcon /> : <CircleIcon />}
+                    </button>
 
-                  {/* テキスト */}
-                  <span className={`flex-1 text-base leading-snug break-all
-                    ${todo.completed ? 'line-through text-gray-400' : 'text-gray-800'}`}
-                  >
-                    {todo.completed && <span className="sr-only">完了済み: </span>}
-                    {todo.text}
-                  </span>
+                    {/* テキスト + バッジ */}
+                    <div className="flex-1 min-w-0">
+                      <span className={`block text-base leading-snug break-all
+                        ${todo.completed ? 'line-through text-gray-400' : 'text-gray-800'}`}
+                      >
+                        {todo.completed && <span className="sr-only">完了済み: </span>}
+                        {todo.text}
+                      </span>
+                      <div className="flex flex-wrap items-center gap-1.5 mt-1">
+                        <span className={`text-[10px] px-1.5 py-0.5 rounded border ${PRIORITY_CLASS[todo.priority]}`}>
+                          優先度: {PRIORITY_LABEL[todo.priority]}
+                        </span>
+                        {todo.dueDate && (
+                          <span
+                            className={`text-[10px] px-1.5 py-0.5 rounded border ${
+                              status === 'overdue'
+                                ? 'bg-red-50 text-red-600 border-red-200'
+                                : status === 'soon'
+                                ? 'bg-amber-50 text-amber-600 border-amber-200'
+                                : 'bg-slate-50 text-slate-500 border-slate-200'
+                            }`}
+                          >
+                            期限: {todo.dueDate}
+                            {status === 'overdue' ? '(期限切れ)' : status === 'soon' ? '(もうすぐ)' : ''}
+                          </span>
+                        )}
+                      </div>
+                    </div>
 
-                  {/* 削除ボタン */}
-                  <button
-                    onClick={() => deleteTodo(todo.id)}
-                    aria-label={`「${todo.text}」を削除`}
-                    className="flex-shrink-0 w-11 h-11 flex items-center justify-center
-                               text-gray-300 hover:text-red-400 active:scale-90
-                               transition-all duration-100 rounded-full"
-                  >
-                    <TrashIcon />
-                  </button>
-                </li>
-              ))}
+                    {/* 削除ボタン */}
+                    <button
+                      onClick={() => deleteTodo(todo.id)}
+                      aria-label={`「${todo.text}」を削除`}
+                      className="flex-shrink-0 w-11 h-11 flex items-center justify-center
+                                 text-gray-300 hover:text-red-400 active:scale-90
+                                 transition-all duration-100 rounded-full"
+                    >
+                      <TrashIcon />
+                    </button>
+                  </li>
+                )
+              })}
             </ul>
 
             <p className="text-sm text-gray-400 text-center mt-5">
