@@ -33,6 +33,13 @@ function tomorrowKey(): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
 }
 
+// 「今日やるべきタスク」かどうかを判定する(期限切れ・本日期限・優先度高のいずれか)
+function isTodayFocus(todo: Todo): boolean {
+  if (todo.completed) return false
+  if (todo.dueDate && todo.dueDate <= todayKey()) return true
+  return todo.priority === 'high'
+}
+
 // 期限日から「期限切れ / もうすぐ(今日・明日) / 通常」を判定する
 function dueDateStatus(dueDate: string | null): 'overdue' | 'soon' | 'normal' | null {
   if (!dueDate) return null
@@ -134,6 +141,7 @@ export default function TodoApp() {
   const [dueDateInput, setDueDateInput] = useState('')
   const [priorityInput, setPriorityInput] = useState<Priority>('medium')
   const [sortMode, setSortMode] = useState<SortMode>('added')
+  const [todayOnly, setTodayOnly] = useState(false)
   const [loaded, setLoaded] = useState(false)
   const [listening, setListening] = useState(false)
   const [supportsVoice, setSupportsVoice] = useState(false)
@@ -265,6 +273,9 @@ export default function TodoApp() {
     return 0 // 'added': 追加順のまま(Array#sortは安定ソート)
   })
 
+  // 「今日やるタスクのみ」がONなら、期限切れ・本日期限・優先度高のものだけに絞り込む
+  const visibleTodos = todayOnly ? sortedTodos.filter(isTodayFocus) : sortedTodos
+
   return (
     <div className="min-h-screen bg-gray-50 flex flex-col items-center py-10 px-4">
       <div className="w-full max-w-md">
@@ -344,8 +355,8 @@ export default function TodoApp() {
           </div>
         ) : (
           <>
-            {/* 並び替え・読み上げコントロール */}
-            <div className="flex items-center justify-between gap-2 mb-3">
+            {/* 並び替え・絞り込み・読み上げコントロール */}
+            <div className="flex flex-wrap items-center gap-2 mb-3">
               <select
                 value={sortMode}
                 onChange={e => setSortMode(e.target.value as SortMode)}
@@ -359,17 +370,36 @@ export default function TodoApp() {
               </select>
 
               <button
+                onClick={() => setTodayOnly(v => !v)}
+                aria-pressed={todayOnly}
+                className={`flex items-center gap-1.5 text-xs rounded-lg px-3 py-1.5 border
+                            active:scale-95 transition-all duration-100
+                            ${todayOnly
+                              ? 'bg-blue-500 text-white border-blue-500'
+                              : 'text-gray-500 border-gray-300 hover:bg-gray-100'
+                            }`}
+              >
+                🎯 今日やるタスクのみ
+              </button>
+
+              <button
                 onClick={speaking ? handleStopSpeak : handleSpeak}
                 className="flex items-center gap-1.5 text-xs text-gray-500 border border-gray-300 rounded-lg
-                           px-3 py-1.5 hover:bg-gray-100 active:scale-95 transition-all duration-100"
+                           px-3 py-1.5 hover:bg-gray-100 active:scale-95 transition-all duration-100 ml-auto"
               >
                 <SpeakerIcon />
                 {speaking ? '読み上げ停止' : 'タスクを読み上げる'}
               </button>
             </div>
 
+            {todayOnly && visibleTodos.length === 0 && (
+              <p className="text-center text-sm text-gray-400 py-8">
+                今日やるべきタスクはありません(期限切れ・本日期限・優先度「高」のタスクがあるとここに表示されます)
+              </p>
+            )}
+
             <ul className="space-y-2">
-              {sortedTodos.map(todo => {
+              {visibleTodos.map(todo => {
                 const status = dueDateStatus(todo.dueDate)
                 return (
                   <li
